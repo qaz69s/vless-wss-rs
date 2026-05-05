@@ -1,8 +1,10 @@
 #!/bin/bash
-# one-line install + run for vless-wss-rs
+# one-line install for vless-wss-rs
 # Usage:
-#   Without cert:   bash <(curl -sL https://raw.githubusercontent.com/qaz69s/vless-wss-rs/main/install.sh) --get-cert example.com --email you@example.com --cf-token TOKEN --uuid UUID
-#   With cert:      bash <(curl -sL https://raw.githubusercontent.com/qaz69s/vless-wss-rs/main/install.sh) --cert fullchain.pem --key privkey.pem --uuid UUID
+#   With existing cert:
+#     curl -sL https://raw.githubusercontent.com/qaz69s/vless-wss-rs/main/install.sh | bash -s -- --cert fullchain.pem --key privkey.pem --uuid UUID
+#   Issue LE cert first:
+#     curl -sL https://raw.githubusercontent.com/qaz69s/vless-wss-rs/main/install.sh | bash -s -- --get-cert example.com --email you@example.com --cf-token TOKEN --uuid UUID
 
 set -e
 
@@ -11,7 +13,7 @@ TMPDIR=$(mktemp -d)
 cd "$TMPDIR"
 
 echo "[*] Downloading vless-wss-rs..."
-curl -sL "https://github.com/$REPO/releases/latest/download/vless-wss-rs-x86_64-unknown-linux-musl.tar.gz" -o vless.tar.gz
+curl -sL "https://github.com/$REPO/releases/download/v1.0.0/vless-wss-rs-x86_64-unknown-linux-musl.tar.gz" -o vless.tar.gz
 
 if [ -f vless.tar.gz ]; then
     tar xzf vless.tar.gz
@@ -20,7 +22,6 @@ if [ -f vless.tar.gz ]; then
     rm -rf "$TMPDIR"
     echo "[+] Installed to /usr/local/bin/vless-wss-rs"
 else
-    # No release yet, build from source
     echo "[*] No release found, building from source..."
     rm -rf "$TMPDIR"
     BUILD_DIR=$(mktemp -d)
