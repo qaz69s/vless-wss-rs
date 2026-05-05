@@ -15,9 +15,7 @@ if [ -f vless.tar.gz ] && [ -s vless.tar.gz ]; then
     rm -rf "$TMPDIR"
     echo "[+] Installed to /usr/local/bin/vless-wss-rs"
 else
-    echo "[-] Download failed. Try building from source:"
-    echo "    git clone https://github.com/$REPO.git ~/vless-wss-rs"
-    echo "    cd ~/vless-wss-rs && cargo build --release"
+    echo "[-] Download failed."
     exit 1
 fi
 
@@ -27,28 +25,38 @@ echo ""
 
 read -p "Cloudflare API Token: " CF_TOKEN
 
-# Step 1: Auto-detect domain from CF token
+# Step 1: Auto-detect domain from CF token (pure bash, no jq/python)
 echo "[*] Fetching domains from Cloudflare..."
-DOMAINS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones" \
+RESP=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones" \
     -H "Authorization: Bearer $CF_TOKEN" \
-    -H "Content-Type: application/json" | \
-    python3 -c "import sys,json; data=json.load(sys.stdin); [print(z['name']) for z in data.get('result',[])]" 2>/dev/null)
+    -H "Content-Type: application/json")
 
-if [ -z "$DOMAINS" ]; then
-    echo "[-] Failed to fetch domains. Ensure CF Token has Zone.Read permission."
+# Check if response indicates success
+SUCCESS=$(echo "$RESP" | grep -o '"success":true' | head -1)
+if [ -z "$SUCCESS" ]; then
+    echo "[-] Cloudflare API error. Check your CF Token."
+    echo "$RESP"
     exit 1
 fi
 
-DOMAIN_COUNT=$(echo "$DOMAINS" | wc -l)
-if [ "$DOMAIN_COUNT" -eq 1 ]; then
-    DOMAIN="$DOMAINS"
-    echo "[+] Auto-detected domain: $DOMAIN"
-else
-    echo "[*] Available domains:"
-    echo "$DOMAINS"
-    echo ""
-    read -p "Select domain: " DOMAIN
+# Extract first domain name using grep/sed (pure bash)
+DOMAIN=$(echo "$RESP" | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"$//')
+if [ -z "$DOMAIN" ]; then
+    echo "[-] No domains found in CF account."
+    exit 1
 fi
+
+# If multiple domains, let user choose
+DOMAIN_COUNT=$(echo "$RESP" | grep -oc '"name":"[^"]*"')
+if [ "$DOMAIN_COUNT" -gt 1 ]; then
+    echo "[*] Available domains:"
+    echo "$RESP" | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"$//' | nl -v 0
+    echo ""
+    read -p "Select domain index: " IDX
+    DOMAIN=$(echo "$RESP" | grep -o '"name":"[^"]*"' | sed -n "$((IDX+1))p" | sed 's/"name":"//;s/"$//')
+fi
+
+echo "[+] Using domain: $DOMAIN"
 
 # Step 2: Auto-detect server public IP
 echo "[*] Detecting server public IP..."
@@ -59,23 +67,21 @@ else
     echo "[+] Server IP: $SERVER_IP"
 fi
 
-# Step 3: Auto-add DNS A record
+# Step 3: Auto-add DNS A record via CF API
 echo "[*] Adding DNS A record $DOMAIN -> $SERVER_IP ..."
 
-ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
-    -H "Authorization: Bearer $CF_TOKEN" \
-    -H "Content-Type: application/json" | \
-    python3 -c "import sys,json; data=json.load(sys.stdin); print(data['result'][0]['id'] if data['result'] else '')" 2>/dev/null)
-
+ZONE_ID=$(echo "$RESP" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"$//')
 if [ -z "$ZONE_ID" ]; then
-    echo "[-] Could not find zone ID for $DOMAIN"
+    echo "[-] Could not find zone ID."
     exit 1
 fi
 
-RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=A&name=$DOMAIN" \
+# Check if A record already exists
+RECORD_RESP=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=A&name=$DOMAIN" \
     -H "Authorization: Bearer $CF_TOKEN" \
-    -H "Content-Type: application/json" | \
-    python3 -c "import sys,json; data=json.load(sys.stdin); print(data['result'][0]['id'] if data['result'] else '')" 2>/dev/null)
+    -H "Content-Type: application/json")
+
+RECORD_ID=$(echo "$RECORD_RESP" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"$//')
 
 if [ -n "$RECORD_ID" ]; then
     curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
@@ -92,13 +98,13 @@ else
 fi
 
 # Step 4: Wait for DNS propagation
-echo "[*] Waiting for DNS propagation (10s)..."
-sleep 10
+echo "[*] Waiting for DNS propagation (15s)..."
+sleep 15
 
 # Step 5: Issue Let's Encrypt certificate via HTTP-01 (port 80)
 echo "[*] Installing acme.sh..."
 if [ ! -f ~/.acme.sh/acme.sh ]; then
-    curl https://get.acme.sh | sh -s email=letsencrypt@$DOMAIN
+    curl https://get.acme.sh | sh -s email=letsencrypt@"$DOMAIN"
 fi
 ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
@@ -106,21 +112,32 @@ echo "[*] Issuing Let's Encrypt certificate (HTTP-01 on port 80)..."
 ~/.acme.sh/acme.sh --issue --standalone --httpport 80 -d "$DOMAIN" --keylength 2048 --server letsencrypt
 
 CERT_DIR="/root/.acme.sh/$DOMAIN"
-if [ ! -f "$CERT_DIR/fullchain.cer" ]; then
-    echo "[-] Certificate issue failed. Check port 80 is free."
+KEY_FILE=$(echo "$CERT_DIR"/*.key 2>/dev/null | head -1)
+FULLCHAIN="$CERT_DIR/fullchain.cer"
+
+if [ ! -f "$FULLCHAIN" ] || [ ! -f "$KEY_FILE" ]; then
+    echo "[-] Certificate issue failed. Check that port 80 is free and DNS has propagated."
     exit 1
 fi
-echo "[+] Certificate issued: $CERT_DIR/fullchain.cer"
+echo "[+] Certificate issued: $FULLCHAIN"
 
 # Step 6: Generate UUID
 UUID=$(cat /proc/sys/kernel/random/uuid)
 echo "[+] Generated UUID: $UUID"
 
-# Step 7: Start vless-wss-rs
+# Step 7: Save config and start
+mkdir -p /etc/vless-wss-rs
+cat > /etc/vless-wss-rs/config.json << EOF
+{
+  "uuid": "$UUID",
+  "domain": "$DOMAIN"
+}
+EOF
+
 echo ""
 echo "[*] Starting vless-wss-rs..."
 exec vless-wss-rs \
-    --cert "$CERT_DIR/fullchain.cer" \
-    --key "$CERT_DIR/$DOMAIN"_key.pem \
-    --uuid "$UUID" \
-    --domain "$DOMAIN"
+    --cert "$FULLCHAIN" \
+    --key "$KEY_FILE" \
+    --domain "$DOMAIN" \
+    --uuid "$UUID"
