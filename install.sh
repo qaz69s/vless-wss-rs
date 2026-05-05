@@ -119,7 +119,10 @@ sleep 15
 echo ""
 echo "[*] 安装 acme.sh..."
 if [ ! -f ~/.acme.sh/acme.sh ]; then
-    curl https://get.acme.sh | sh -s email=letsencrypt@"$DOMAIN" 2>&1 | tail -3
+    # 中国大陆镜像
+    curl https://get.acme.sh | sh -s email=letsencrypt@"$DOMAIN" 2>&1 | tail -3 || \
+    curl https://ghproxy.com/https://github.com/acmesh-official/acme.sh/archive/master.tar.gz | tar xz -C /tmp && \
+    mv /tmp/acme.sh-master/acme.sh ~/.acme.sh/ && chmod +x ~/.acme.sh/acme.sh
 fi
 ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt 2>&1 | tail -1
 
