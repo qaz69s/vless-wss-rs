@@ -43,10 +43,9 @@ fi
 
 echo ""
 echo "[*] Issuing Let's Encrypt certificate for: $DOMAIN"
-echo "[*] This will configure DNS via Cloudflare..."
 echo ""
 
-# Run vless-wss-rs with --get-cert — it will call acme.sh internally
+# Issue cert then start server
 exec vless-wss-rs \
     --get-cert "$DOMAIN" \
     --email "$EMAIL" \
