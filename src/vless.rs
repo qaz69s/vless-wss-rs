@@ -15,7 +15,7 @@ use subtle::ConstantTimeEq;
 /// [2] port (BE)
 /// ... body
 
-pub const VLESS_VERSION: u8 = 0x01;
+pub const VLESS_VERSION: u8 = 0x00;
 pub const CMD_TCP: u8 = 0x01;
 pub const CMD_UDP: u8 = 0x02;
 pub const ADDR_IPV4: u8 = 0x01;
