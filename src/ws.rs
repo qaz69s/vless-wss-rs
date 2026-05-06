@@ -36,6 +36,16 @@ pub async fn handle_connection(
         return Err(io::Error::new(ErrorKind::Unsupported, "only TCP supported").into());
     }
 
+    // FIX #1: send VLESS response header before relaying any data.
+    // The VLESS protocol requires the server to respond with [version=0x01, addonLen=0x00]
+    // immediately after accepting the first packet. The original code omitted this,
+    // causing every client to stall or disconnect.
+    let vless_resp = tokio_tungstenite::tungstenite::Message::Binary(
+        vec![vless::VLESS_VERSION, 0x00].into()
+    );
+    ws.send(vless_resp).await
+        .map_err(|e| io::Error::new(ErrorKind::BrokenPipe, format!("send VLESS resp: {}", e)))?;
+
     let target = format!("{}:{}", addr, port);
     let mut upstream = TcpStream::connect(&target).await
         .map_err(|e| { error!("upstream connect failed: {}", e); e })?;
@@ -44,7 +54,6 @@ pub async fn handle_connection(
         upstream.write_all(&body).await?;
     }
 
-    // Pass ownership of ws into relay
     relay_ws_upstream(ws, upstream, peer).await?;
 
     info!("[{}] connection closed", peer);
@@ -65,6 +74,9 @@ async fn relay_ws_upstream(
         loop {
             match ws_stream.next().await {
                 Some(Ok(msg)) => {
+                    if !msg.is_binary() {
+                        continue; // ignore text / ping / pong / close frames
+                    }
                     let data = msg.into_data();
                     if data.is_empty() {
                         continue;
@@ -87,7 +99,9 @@ async fn relay_ws_upstream(
             match up_rd.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    let msg = tokio_tungstenite::tungstenite::Message::Binary(buf[..n].to_vec().into());
+                    let msg = tokio_tungstenite::tungstenite::Message::Binary(
+                        buf[..n].to_vec().into()
+                    );
                     if ws_sink.send(msg).await.is_err() {
                         break;
                     }
