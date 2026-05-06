@@ -1,22 +1,31 @@
 #!/bin/bash
-# vless-wss-rs — 交互式一键安装
+# vless-wss-rs — 纯静默一键安装版 (完整后台服务与输出版)
 set -euo pipefail
+
+# --- 颜色与提示 ---
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+PLAIN='\033[0m'
+
+# ────────────────────────────────────────────────────────────
+# 参数校验
+# ────────────────────────────────────────────────────────────
+if [[ -z "${CF_TOKEN:-}" ]] || [[ -z "${BASE_DOMAIN:-}" ]]; then
+    echo "[-] 错误: 必须提供 CF_TOKEN 和 BASE_DOMAIN 环境变量！"
+    echo "用法示例:"
+    echo "CF_TOKEN=\"你的Token\" BASE_DOMAIN=\"example.com\" bash auto-install.sh"
+    exit 1
+fi
+
+MODE=${MODE:-1}
+UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
+LISTEN=${LISTEN:-"0.0.0.0:443"}
+# 提取端口号用于生成分享链接
+PORT=$(echo "$LISTEN" | awk -F':' '{print $NF}')
 
 # ────────────────────────────────────────────────────────────
 # 工具函数
 # ────────────────────────────────────────────────────────────
-gen_uuid() {
-    if command -v uuidgen &>/dev/null; then
-        uuidgen | tr '[:upper:]' '[:lower:]'
-    elif [[ -r /proc/sys/kernel/random/uuid ]]; then
-        cat /proc/sys/kernel/random/uuid
-    else
-        local h; h=$(openssl rand -hex 16)
-        printf '%s-%s-%s-%s-%s\n' \
-            "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
-    fi
-}
-
 gen_email() {
     local user; user=$(openssl rand -hex 5)
     echo "${user}@$(openssl rand -hex 4).net"
@@ -76,7 +85,6 @@ install_binary() {
     echo "[*] 正在下载 vless-wss-rs..."
     local REPO="qaz69s/vless-wss-rs"
     local TMP; TMP=$(mktemp -d)
-    trap "rm -rf $TMP" RETURN
     if curl -sLf \
         "https://github.com/$REPO/releases/latest/download/vless-wss-rs-x86_64-unknown-linux-musl.tar.gz" \
         -o "$TMP/vless.tar.gz" 2>/dev/null; then
@@ -85,126 +93,95 @@ install_binary() {
         mv "$TMP/vless-wss-rs" /usr/local/bin/
         echo "[+] 已从 Release 安装"
     else
-        echo "[*] 未找到 Release，从源码编译..."
-        command -v cargo &>/dev/null || {
-            echo "[-] 未安装 cargo，请先运行："
-            echo "    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-            exit 1
-        }
-        local BUILD; BUILD=$(mktemp -d)
-        git clone "https://github.com/$REPO.git" --depth=1 "$BUILD/repo"
-        cargo build --release --manifest-path "$BUILD/repo/Cargo.toml"
-        mv "$BUILD/repo/target/release/vless-wss-rs" /usr/local/bin/
-        rm -rf "$BUILD"
-        echo "[+] 编译完成"
+        echo "[-] 下载 Release 失败，请检查网络。"
+        exit 1
     fi
+    rm -rf "$TMP"
 }
 
 # ────────────────────────────────────────────────────────────
-# 关键修复：curl | bash 时 stdin 是管道而非终端
-# 重定向 stdin 到 /dev/tty，让 read 能读到键盘输入
+# 核心执行逻辑
 # ────────────────────────────────────────────────────────────
-exec </dev/tty
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+echo -e "${GREEN}  vless-wss-rs 纯静默一键安装 (Cloudflare DNS 版)${PLAIN}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
 
-# ────────────────────────────────────────────────────────────
-# 交互式输入
-# ────────────────────────────────────────────────────────────
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "        vless-wss-rs 一键安装配置向导"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-
-echo "请选择模式："
-echo "  1) 自动模式 — 随机子域名 + Cloudflare DNS + 自动申请证书"
-echo "  2) 手动模式 — 使用已有证书文件"
-echo ""
-read -rp "输入选项 [1/2，默认 1]: " MODE_INPUT
-MODE=${MODE_INPUT:-1}
-
-echo ""
-
-if [[ "$MODE" == "2" ]]; then
-    # ── 手动证书模式 ─────────────────────────────────────────
-    read -rp "证书路径 (fullchain.pem): " CERT
-    read -rp "私钥路径 (privkey.pem):   " KEY
-    [[ -f "$CERT" ]] || { echo "[-] 证书文件不存在"; exit 1; }
-    [[ -f "$KEY"  ]] || { echo "[-] 私钥文件不存在"; exit 1; }
-
-    read -rp "UUID [留空随机生成]: " UUID
-    [[ -z "$UUID" ]] && UUID=$(gen_uuid) && echo "[*] 随机 UUID: $UUID"
-
-    read -rp "监听地址 [默认 0.0.0.0:443]: " LISTEN
-    LISTEN=${LISTEN:-0.0.0.0:443}
-
-else
-    # ── 自动模式 ─────────────────────────────────────────────
-    read -rp "Cloudflare API Token (Zone:Read + DNS:Edit): " CF_TOKEN
-    [[ -z "$CF_TOKEN" ]] && { echo "[-] Token 不能为空"; exit 1; }
-
-    read -rp "根域名 (例: example.com): " BASE_DOMAIN
-    [[ -z "$BASE_DOMAIN" ]] && { echo "[-] 域名不能为空"; exit 1; }
-
-    read -rp "UUID [留空随机生成]: " UUID
-    [[ -z "$UUID" ]] && UUID=$(gen_uuid) && echo "[*] 随机 UUID: $UUID"
-
-    read -rp "监听地址 [默认 0.0.0.0:443]: " LISTEN
-    LISTEN=${LISTEN:-0.0.0.0:443}
-
-    EMAIL=$(gen_email)
-    echo "[*] 注册邮箱: $EMAIL（随机生成，仅用于 Let's Encrypt）"
-
-    echo ""
-
-    install_binary
-
-    SUB=$(openssl rand -hex 3)
-    FQDN="${SUB}.${BASE_DOMAIN}"
-    echo "[*] 随机子域名: $FQDN"
-
-    SERVER_IP=$(get_public_ip)
-    echo "[*] 本机公网 IP: $SERVER_IP"
-
-    echo "[*] 查询 Cloudflare Zone ID..."
-    ZONE_ID=$(cf_zone_id "$BASE_DOMAIN" "$CF_TOKEN") || {
-        echo "[-] 未找到 ${BASE_DOMAIN} 对应的 Zone，请检查 Token 权限和域名"
-        exit 1
-    }
-    echo "[+] Zone ID: $ZONE_ID"
-
-    RECORD_ID=$(cf_create_a_record "$ZONE_ID" "$FQDN" "$SERVER_IP" "$CF_TOKEN")
-    echo "[+] DNS A 记录已创建: $FQDN → $SERVER_IP (id=$RECORD_ID)"
-
-    install_acme "$EMAIL"
-    ACME=~/.acme.sh/acme.sh
-    "$ACME" --set-default-ca --server letsencrypt 2>/dev/null || true
-    echo "[*] 申请 TLS 证书（DNS-01）..."
-    CF_Token="$CF_TOKEN" \
-        "$ACME" --issue --dns dns_cf -d "$FQDN" --keylength ec-256 --server letsencrypt
-
-    CERT_DIR=~/.acme.sh/${FQDN}_ecc
-    [[ -f "${CERT_DIR}/fullchain.cer" ]] || { echo "[-] 证书申请失败"; exit 1; }
-    CERT="${CERT_DIR}/fullchain.cer"
-    KEY="${CERT_DIR}/${FQDN}.key"
-
-    echo ""
-    echo "┌──────────────────────────────────────────────────┐"
-    echo "│  域名: $FQDN"
-    echo "│  证书: $CERT"
-    echo "│  私钥: $KEY"
-    echo "└──────────────────────────────────────────────────┘"
-fi
-
-echo ""
-echo "[*] 启动 vless-wss-rs..."
-echo "    监听: $LISTEN"
-echo "    UUID: $UUID"
-echo ""
-
+EMAIL=$(gen_email)
 install_binary
 
-exec /usr/local/bin/vless-wss-rs \
-    --cert   "$CERT"   \
-    --key    "$KEY"    \
-    --uuid   "$UUID"   \
-    --listen "$LISTEN"
+SUB=$(openssl rand -hex 3)
+FQDN="${SUB}.${BASE_DOMAIN}"
+echo -e "[*] 随机 UUID: ${YELLOW}$UUID${PLAIN}"
+echo -e "[*] 随机子域名: ${YELLOW}$FQDN${PLAIN}"
+
+SERVER_IP=$(get_public_ip)
+echo -e "[*] 本机公网 IP: ${YELLOW}$SERVER_IP${PLAIN}"
+
+echo "[*] 查询 Cloudflare Zone ID..."
+ZONE_ID=$(cf_zone_id "$BASE_DOMAIN" "$CF_TOKEN") || {
+    echo "[-] 未找到 ${BASE_DOMAIN} 对应的 Zone，请检查 Token 权限和域名"
+    exit 1
+}
+
+RECORD_ID=$(cf_create_a_record "$ZONE_ID" "$FQDN" "$SERVER_IP" "$CF_TOKEN")
+echo -e "[+] DNS A 记录已创建: ${YELLOW}$FQDN → $SERVER_IP${PLAIN}"
+
+install_acme "$EMAIL"
+ACME=~/.acme.sh/acme.sh
+"$ACME" --set-default-ca --server letsencrypt 2>/dev/null || true
+echo "[*] 申请 TLS 证书（DNS-01）..."
+export CF_Token="$CF_TOKEN"
+"$ACME" --issue --dns dns_cf -d "$FQDN" --keylength ec-256 --server letsencrypt
+
+# 规范化证书路径
+CERT_BASE_DIR="/etc/vless-wss-rs"
+mkdir -p "$CERT_BASE_DIR"
+"$ACME" --install-cert -d "$FQDN" --ecc \
+    --fullchain-file "$CERT_BASE_DIR/cert.cer" \
+    --key-file "$CERT_BASE_DIR/private.key"
+
+echo -e "[+] 证书已安装至: ${YELLOW}$CERT_BASE_DIR${PLAIN}"
+
+# 配置 Systemd 守护进程
+echo "[*] 配置 Systemd 后台服务..."
+cat > /etc/systemd/system/vless-wss-rs.service <<EOF
+[Unit]
+Description=vless-wss-rs Lightweight VLESS WebSocket Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/vless-wss-rs --cert $CERT_BASE_DIR/cert.cer --key $CERT_BASE_DIR/private.key --uuid $UUID --listen $LISTEN
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable vless-wss-rs
+systemctl restart vless-wss-rs
+
+# 生成 VLESS 导入链接并输出节点信息
+VLESS_LINK="vless://${UUID}@${FQDN}:${PORT}?encryption=none&security=tls&type=ws&sni=${FQDN}#vless-wss-rs"
+
+echo ""
+echo -e "${GREEN}================================================================${PLAIN}"
+echo -e "${GREEN} 恭喜！vless-wss-rs 安装成功并已在后台稳定运行！${PLAIN}"
+echo -e "${GREEN}================================================================${PLAIN}"
+echo -e " 地址 (Address): ${YELLOW}${FQDN}${PLAIN}"
+echo -e " 端口 (Port)   : ${YELLOW}${PORT}${PLAIN}"
+echo -e " 用户 (UUID)   : ${YELLOW}${UUID}${PLAIN}"
+echo -e " 传输协议 (Net): ${YELLOW}ws${PLAIN}"
+echo -e " 伪装域名 (SNI): ${YELLOW}${FQDN}${PLAIN}"
+echo -e " 底层传输安全  : ${YELLOW}tls${PLAIN}"
+echo -e " 证书存放目录  : ${YELLOW}${CERT_BASE_DIR}${PLAIN}"
+echo -e "${GREEN}================================================================${PLAIN}"
+echo -e " ${YELLOW}👇 一键导入链接 (复制以下全段内容至客户端):${PLAIN}"
+echo -e "\n${VLESS_LINK}\n"
+echo -e "${GREEN}================================================================${PLAIN}"
+echo -e " 日志查看命令: journalctl -u vless-wss-rs -f"
+echo -e " 服务重启命令: systemctl restart vless-wss-rs"
