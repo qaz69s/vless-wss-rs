@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use rustls::ServerConfig;
+use rustls::crypto::CryptoProvider;
 use log::{info, error};
 
 #[derive(Parser, Debug)]
@@ -35,6 +36,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info")
     ).init();
+
+    // rustls 0.23+ 要求显式安装 CryptoProvider
+    CryptoProvider::install_default(
+        rustls::crypto::ring::default_provider()
+    ).ok();
 
     let args = Args::parse();
 
