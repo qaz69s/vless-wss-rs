@@ -1,5 +1,5 @@
 #!/bin/bash
-# vless-wss-rs 综合管理工具箱
+# vless-wss-rs 综合管理工具箱 (Standalone 独立证书模式)
 # 包含：一键安装、日志查看、服务重启、彻底卸载
 
 set -euo pipefail
@@ -43,36 +43,6 @@ get_public_ip() {
     echo "$ip"
 }
 
-cf_zone_id() {
-    local domain="$1" token="$2"
-    local IFS='.'; read -ra parts <<< "$domain"
-    local n=${#parts[@]}
-    for ((i=0; i<n-1; i++)); do
-        local candidate="${parts[*]:$i}"
-        local zone_id
-        zone_id=$(curl -sf \
-            "https://api.cloudflare.com/client/v4/zones?name=${candidate}&status=active" \
-            -H "Authorization: Bearer ${token}" \
-            -H "Content-Type: application/json" \
-            | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-        [[ -n "$zone_id" ]] && { echo "$zone_id"; return 0; }
-    done
-    return 1
-}
-
-cf_create_a_record() {
-    local zone_id="$1" fqdn="$2" ip="$3" token="$4"
-    local resp
-    resp=$(curl -sf -X POST \
-        "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records" \
-        -H "Authorization: Bearer ${token}" \
-        -H "Content-Type: application/json" \
-        -d "{\"type\":\"A\",\"name\":\"${fqdn}\",\"content\":\"${ip}\",\"ttl\":60,\"proxied\":false}")
-    echo "$resp" | grep -q '"success":true' \
-        || { echo -e "${RED}[-] CF 建 DNS 记录失败: $resp${PLAIN}" >&2; exit 1; }
-    echo "$resp" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
-}
-
 install_acme() {
     local email="$1"
     [[ -f ~/.acme.sh/acme.sh ]] && return
@@ -107,57 +77,63 @@ install_binary() {
 function do_install() {
     clear
     echo -e "${CYAN}================================================================${PLAIN}"
-    echo -e "${CYAN}                开始安装 vless-wss-rs                   ${PLAIN}"
+    echo -e "${CYAN}                开始安装 vless-wss-rs (独立证书版)              ${PLAIN}"
     echo -e "${CYAN}================================================================${PLAIN}"
+    echo -e "${YELLOW}警告: 运行前请确保您的域名已经正确解析到本机的公网 IP！${PLAIN}"
+    echo -e "${CYAN}================================================================${PLAIN}\n"
     
     if [ -f "/etc/systemd/system/vless-wss-rs.service" ]; then
         echo -e "${YELLOW}[!] 检测到系统已安装 vless-wss-rs，继续安装将覆盖原配置。${PLAIN}"
     fi
 
-    read -rp "1. 请输入 Cloudflare API Token (需具备 Zone:Read + DNS:Edit): " CF_TOKEN
-    [[ -z "$CF_TOKEN" ]] && { echo -e "${RED}[-] Token 不能为空${PLAIN}"; return; }
+    read -rp "1. 请输入已解析到本机的完整域名 (例如: vless.example.com): " DOMAIN
+    [[ -z "$DOMAIN" ]] && { echo -e "${RED}[-] 域名不能为空${PLAIN}"; return; }
 
-    read -rp "2. 请输入根域名 (例: example.com): " BASE_DOMAIN
-    [[ -z "$BASE_DOMAIN" ]] && { echo -e "${RED}[-] 域名不能为空${PLAIN}"; return; }
-
-    read -rp "3. 请输入 UUID [留空随机生成]: " UUID
+    read -rp "2. 请输入 UUID [留空随机生成]: " UUID
     [[ -z "$UUID" ]] && UUID=$(gen_uuid) && echo -e "   ${YELLOW}[*] 已自动生成随机 UUID: $UUID${PLAIN}"
 
-    read -rp "4. 请输入监听地址与端口 [默认 0.0.0.0:443]: " LISTEN
+    read -rp "3. 请输入监听地址与端口 [默认 0.0.0.0:443]: " LISTEN
     LISTEN=${LISTEN:-0.0.0.0:443}
     PORT=$(echo "$LISTEN" | awk -F':' '{print $NF}')
 
     echo -e "\n${GREEN}================ 开始自动化部署 ==================${PLAIN}"
 
     EMAIL=$(gen_email)
-    install_binary
+    
+    # 检查并安装独立模式所需依赖 (socat, lsof)
+    echo -e "${GREEN}[*] 检查环境依赖...${PLAIN}"
+    if command -v apt-get &>/dev/null; then
+        apt-get update -y >/dev/null 2>&1 && apt-get install -y socat lsof psmisc >/dev/null 2>&1 || true
+    elif command -v yum &>/dev/null; then
+        yum install -y socat lsof psmisc >/dev/null 2>&1 || true
+    fi
 
-    SUB=$(openssl rand -hex 3)
-    FQDN="${SUB}.${BASE_DOMAIN}"
-    echo -e "${GREEN}[*] 随机子域名: ${YELLOW}$FQDN${PLAIN}"
+    install_binary
 
     SERVER_IP=$(get_public_ip)
     echo -e "${GREEN}[*] 本机公网 IP: ${YELLOW}$SERVER_IP${PLAIN}"
+    echo -e "${GREEN}[*] 您绑定的域名: ${YELLOW}$DOMAIN${PLAIN}"
 
-    echo -e "${GREEN}[*] 查询 Cloudflare Zone ID...${PLAIN}"
-    ZONE_ID=$(cf_zone_id "$BASE_DOMAIN" "$CF_TOKEN") || {
-        echo -e "${RED}[-] 未找到 ${BASE_DOMAIN} 对应的 Zone，请检查 Token 权限和域名${PLAIN}"
-        return
-    }
-
-    RECORD_ID=$(cf_create_a_record "$ZONE_ID" "$FQDN" "$SERVER_IP" "$CF_TOKEN")
-    echo -e "${GREEN}[+] DNS A 记录已创建: ${YELLOW}$FQDN → $SERVER_IP${PLAIN}"
+    # 确保证书申请时 80 端口未被占用
+    if lsof -i :80 > /dev/null 2>&1; then
+        echo -e "${YELLOW}[!] 检测到 80 端口被占用，尝试临时解除占用以便申请证书...${PLAIN}"
+        fuser -k 80/tcp || true
+        sleep 2
+    fi
 
     install_acme "$EMAIL"
     ACME=~/.acme.sh/acme.sh
     "$ACME" --set-default-ca --server letsencrypt 2>/dev/null || true
-    echo -e "${GREEN}[*] 申请 TLS 证书（DNS-01）...${PLAIN}"
-    export CF_Token="$CF_TOKEN"
-    "$ACME" --issue --dns dns_cf -d "$FQDN" --keylength ec-256 --server letsencrypt
+    echo -e "${GREEN}[*] 申请 TLS 证书（Standalone 模式）...${PLAIN}"
+    
+    if ! "$ACME" --issue -d "$DOMAIN" --standalone --keylength ec-256; then
+        echo -e "${RED}[-] 证书申请失败！请检查域名是否已解析到 $SERVER_IP，且防火墙已放行 80 端口。${PLAIN}"
+        return
+    fi
 
     CERT_BASE_DIR="/etc/vless-wss-rs"
     mkdir -p "$CERT_BASE_DIR"
-    "$ACME" --install-cert -d "$FQDN" --ecc \
+    "$ACME" --install-cert -d "$DOMAIN" --ecc \
         --fullchain-file "$CERT_BASE_DIR/cert.cer" \
         --key-file "$CERT_BASE_DIR/private.key"
 
@@ -183,15 +159,15 @@ EOF
     systemctl enable vless-wss-rs
     systemctl restart vless-wss-rs
 
-    VLESS_LINK="vless://${UUID}@${FQDN}:${PORT}?encryption=none&security=tls&type=ws&sni=${FQDN}#vless-wss-rs"
+    VLESS_LINK="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=tls&type=ws&sni=${DOMAIN}#vless-wss-rs"
 
     echo -e "\n${CYAN}================================================================${PLAIN}"
     echo -e "${GREEN} 恭喜！vless-wss-rs 安装成功并已在后台稳定运行！${PLAIN}"
     echo -e "${CYAN}================================================================${PLAIN}"
-    echo -e " 地址 (Address): ${YELLOW}${FQDN}${PLAIN}"
+    echo -e " 地址 (Address): ${YELLOW}${DOMAIN}${PLAIN}"
     echo -e " 端口 (Port)   : ${YELLOW}${PORT}${PLAIN}"
     echo -e " 用户 (UUID)   : ${YELLOW}${UUID}${PLAIN}"
-    echo -e " 伪装域名 (SNI): ${YELLOW}${FQDN}${PLAIN}"
+    echo -e " 伪装域名 (SNI): ${YELLOW}${DOMAIN}${PLAIN}"
     echo -e "${CYAN}================================================================${PLAIN}"
     echo -e " ${YELLOW}👇 一键导入链接 (复制以下全段内容):${PLAIN}"
     echo -e "\n${VLESS_LINK}\n"
@@ -259,7 +235,7 @@ while true; do
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e "${CYAN}         vless-wss-rs 综合管理工具箱 v1.0         ${PLAIN}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e " ${GREEN}1.${PLAIN} 安装 vless-wss-rs (一键全自动部署)"
+    echo -e " ${GREEN}1.${PLAIN} 安装 vless-wss-rs (独立证书全自动部署)"
     echo -e " ${GREEN}2.${PLAIN} 查看运行日志 (排查连接问题)"
     echo -e " ${GREEN}3.${PLAIN} 重启核心服务"
     echo -e " ${GREEN}4.${PLAIN} 彻底卸载程序"
