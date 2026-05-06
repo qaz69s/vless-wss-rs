@@ -1,5 +1,5 @@
 #!/bin/bash
-# vless-wss-rs 综合管理工具箱 (Standalone 独立证书模式)
+# vless-wss-rs 综合管理工具箱 (Standalone 独立证书模式 - 防重复申请阻断版)
 # 包含：一键安装、日志查看、服务重启、彻底卸载
 
 set -euo pipefail
@@ -11,12 +11,8 @@ RED='\033[0;31m'
 CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
-# 强制允许远程一键运行时的终端输入
 exec </dev/tty
 
-# ────────────────────────────────────────────────────────────
-# 核心工具函数 (静默依赖)
-# ────────────────────────────────────────────────────────────
 gen_uuid() {
     if command -v uuidgen &>/dev/null; then
         uuidgen | tr '[:upper:]' '[:lower:]'
@@ -69,11 +65,6 @@ install_binary() {
     fi
 }
 
-# ────────────────────────────────────────────────────────────
-# 菜单功能模块
-# ────────────────────────────────────────────────────────────
-
-# 1. 安装模块
 function do_install() {
     clear
     echo -e "${CYAN}================================================================${PLAIN}"
@@ -100,7 +91,6 @@ function do_install() {
 
     EMAIL=$(gen_email)
     
-    # 检查并安装独立模式所需依赖 (socat, lsof)
     echo -e "${GREEN}[*] 检查环境依赖...${PLAIN}"
     if command -v apt-get &>/dev/null; then
         apt-get update -y >/dev/null 2>&1 && apt-get install -y socat lsof psmisc >/dev/null 2>&1 || true
@@ -114,7 +104,6 @@ function do_install() {
     echo -e "${GREEN}[*] 本机公网 IP: ${YELLOW}$SERVER_IP${PLAIN}"
     echo -e "${GREEN}[*] 您绑定的域名: ${YELLOW}$DOMAIN${PLAIN}"
 
-    # 确保证书申请时 80 端口未被占用
     if lsof -i :80 > /dev/null 2>&1; then
         echo -e "${YELLOW}[!] 检测到 80 端口被占用，尝试临时解除占用以便申请证书...${PLAIN}"
         fuser -k 80/tcp || true
@@ -126,16 +115,19 @@ function do_install() {
     "$ACME" --set-default-ca --server letsencrypt 2>/dev/null || true
     echo -e "${GREEN}[*] 申请 TLS 证书（Standalone 模式）...${PLAIN}"
     
-    if ! "$ACME" --issue -d "$DOMAIN" --standalone --keylength ec-256; then
-        echo -e "${RED}[-] 证书申请失败！请检查域名是否已解析到 $SERVER_IP，且防火墙已放行 80 端口。${PLAIN}"
-        return
-    fi
+    # 【修复核心】允许 acme.sh 报错跳过（比如证书已存在未过期时）
+    "$ACME" --issue -d "$DOMAIN" --standalone --keylength ec-256 || true
 
     CERT_BASE_DIR="/etc/vless-wss-rs"
     mkdir -p "$CERT_BASE_DIR"
-    "$ACME" --install-cert -d "$DOMAIN" --ecc \
+    
+    # 【修复核心】只要能把证书提取出来安装到指定目录，就算成功
+    if ! "$ACME" --install-cert -d "$DOMAIN" --ecc \
         --fullchain-file "$CERT_BASE_DIR/cert.cer" \
-        --key-file "$CERT_BASE_DIR/private.key"
+        --key-file "$CERT_BASE_DIR/private.key"; then
+        echo -e "${RED}[-] 证书获取或提取失败！请检查域名解析和 80 端口是否被阻挡。${PLAIN}"
+        return
+    fi
 
     echo -e "${GREEN}[*] 配置 Systemd 后台服务...${PLAIN}"
     cat > /etc/systemd/system/vless-wss-rs.service <<EOF
@@ -174,7 +166,6 @@ EOF
     echo -e "${CYAN}================================================================${PLAIN}"
 }
 
-# 2. 查看日志模块
 function do_view_logs() {
     clear
     if ! systemctl is-active --quiet vless-wss-rs; then
@@ -187,7 +178,6 @@ function do_view_logs() {
     fi
 }
 
-# 3. 重启核心模块
 function do_restart() {
     clear
     if [ -f "/etc/systemd/system/vless-wss-rs.service" ]; then
@@ -203,7 +193,6 @@ function do_restart() {
     fi
 }
 
-# 4. 彻底卸载模块
 function do_uninstall() {
     clear
     echo -e "${RED}================================================================${PLAIN}"
@@ -227,13 +216,10 @@ function do_uninstall() {
     fi
 }
 
-# ────────────────────────────────────────────────────────────
-# 主程序入口 (无限循环菜单)
-# ────────────────────────────────────────────────────────────
 while true; do
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-    echo -e "${CYAN}         vless-wss-rs 综合管理工具箱 v1.0         ${PLAIN}"
+    echo -e "${CYAN}         vless-wss-rs 综合管理工具箱 v1.1         ${PLAIN}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
     echo -e " ${GREEN}1.${PLAIN} 安装 vless-wss-rs (独立证书全自动部署)"
     echo -e " ${GREEN}2.${PLAIN} 查看运行日志 (排查连接问题)"
@@ -258,7 +244,6 @@ while true; do
            ;;
     esac
     
-    # 执行完任意非退出操作后，暂停一下，等待用户按回车继续
     echo ""
     read -rp "按下 回车键 (Enter) 返回主菜单..."
     clear
