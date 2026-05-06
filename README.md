@@ -1,67 +1,63 @@
 # vless-wss-rs
 
-VLESS WSS Server — a minimal, pure Rust implementation for personal use.
+纯 Rust 编写的 VLESS WebSocket + TLS 服务端，体积小（静态二进制），零运行时依赖。
 
-## Features
+## 功能特性
 
 - VLESS TCP over WebSocket + TLS
-- Let's Encrypt certificate via acme.sh (DNS-01 challenge with Cloudflare)
-- Zero runtime dependencies (static binary)
-- Supports any CDN
+- Let's Encrypt 证书（acme.sh HTTP-01 自动申请）
+- 支持任意 CDN（如 Cloudflare）
+- 纯 Rust，无 OpenSSL 依赖
+- 静态编译，无需运行时
 
-## One-line Install
-
-```bash
-curl -sL https://raw.githubusercontent.com/qaz69s/vless-wss-rs/main/install.sh | bash
-```
-
-Or with parameters:
+## 一键安装
 
 ```bash
-curl -sL https://raw.githubusercontent.com/qaz69s/vless-wss-rs/main/install.sh | bash -s -- \
-  --get-cert example.com --email you@example.com --cf-token CF_TOKEN --uuid UUID
+curl -sL https://raw.githubusercontent.com/qaz69s/vless-wss-rs/main/install.sh -o /tmp/install.sh && bash /tmp/install.sh
 ```
 
-## Usage
+交互式部署，只需输入 Cloudflare API Token，其余全部自动完成（域名检测 → DNS 录入 → 申请证书 → 启动服务）。
 
-### Issue a Let's Encrypt certificate (first time)
+## 手动运行
 
-Requires Cloudflare DNS API token with permission to add TXT records.
+### 已有证书
 
 ```bash
 vless-wss-rs \
-  --get-cert example.com \
-  --email you@example.com \
-  --cf-token CF_TOKEN \
-  --uuid YOUR_UUID \
+  --cert /root/.acme.sh/example.com/fullchain.cer \
+  --key /root/.acme.sh/example.com/example.com.key \
+  --domain example.com \
+  --uuid 你的UUID \
   --listen 0.0.0.0:8443
 ```
 
-Certificate is saved to `~/.acme.sh/{domain}/` and auto-renewed by acme.sh.
-
-### Use existing certificate
-
-```bash
-vless-wss-rs \
-  --cert fullchain.pem \
-  --key privkey.pem \
-  --uuid YOUR_UUID \
-  --listen 0.0.0.0:8443
-```
-
-### All options
+### 所有参数
 
 ```
---cert <PATH>        TLS certificate (PEM)
---key <PATH>         TLS private key (PEM)
---get-cert <DOMAIN>  Issue a Let's Encrypt cert for this domain
---email <EMAIL>  Email for Let's Encrypt registration
---cf-token <TOKEN>   Cloudflare DNS API token (for DNS-01 challenge)
---uuid <UUID>        VLESS user UUID
---listen <ADDR>      Listen address [default: 0.0.0.0:8443]
+--cert <文件>     TLS 证书文件 (PEM)
+--key <文件>      TLS 私钥文件 (PEM)
+--domain <域名>   域名（用于 VLESS 节点链接）
+--uuid <UUID>     VLESS 用户 UUID（可不填，自动生成）
+--listen <地址>   监听地址 [默认: 0.0.0.0:8443]
 ```
 
-## Build from source
+## 工作原理
+
+1. 客户端通过 TLS + WebSocket 连接
+2. 服务端读取第一个二进制帧（VLESS 首包）
+3. 从首包解析 UUID、指令、目标地址/端口
+4. 服务端连接到目标上游
+5. 双向转发：WebSocket ↔ 上游
+
+## 节点链接格式
+
+```
+vless://<UUID>@<域名>:8443?encryption=none&flow=xtls-rprx-vision&security=tls&sni=<域名>&fp=chrome&type=ws&host=<域名>&path=%2F#<域名>
+```
+
+服务启动后自动打印完整节点链接。
+
+## 自行编译
 
 ```bash
 git clone https://github.com/qaz69s/vless-wss-rs.git
@@ -70,16 +66,8 @@ cargo build --release
 ./target/release/vless-wss-rs --help
 ```
 
-## How it works
+## 已知限制
 
-1. Client connects via TLS + WebSocket
-2. Server reads the first WebSocket binary frame (VLESS first packet)
-3. Server parses UUID, command, target address/port from the packet
-4. Server connects to the target upstream
-5. Bidirectional relay: WebSocket ↔ upstream
-
-## Limitations
-
-- TCP only (no UDP/XUDP)
-- No encryption beyond TLS — the VLESS header is plaintext
-- No connection limits or statistics
+- 仅支持 TCP（暂无 UDP/XUDP）
+- TLS 内部传输为明文，VLESS 头未加密
+- 无连接数限制/流量统计
