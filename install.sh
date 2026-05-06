@@ -1,31 +1,34 @@
 #!/bin/bash
-# vless-wss-rs — 纯静默一键安装版 (完整后台服务与输出版)
+# vless-wss-rs 综合管理工具箱
+# 包含：一键安装、日志查看、服务重启、彻底卸载
+
 set -euo pipefail
 
 # --- 颜色与提示 ---
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
-# ────────────────────────────────────────────────────────────
-# 参数校验
-# ────────────────────────────────────────────────────────────
-if [[ -z "${CF_TOKEN:-}" ]] || [[ -z "${BASE_DOMAIN:-}" ]]; then
-    echo "[-] 错误: 必须提供 CF_TOKEN 和 BASE_DOMAIN 环境变量！"
-    echo "用法示例:"
-    echo "CF_TOKEN=\"你的Token\" BASE_DOMAIN=\"example.com\" bash auto-install.sh"
-    exit 1
-fi
-
-MODE=${MODE:-1}
-UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
-LISTEN=${LISTEN:-"0.0.0.0:443"}
-# 提取端口号用于生成分享链接
-PORT=$(echo "$LISTEN" | awk -F':' '{print $NF}')
+# 强制允许远程一键运行时的终端输入
+exec </dev/tty
 
 # ────────────────────────────────────────────────────────────
-# 工具函数
+# 核心工具函数 (静默依赖)
 # ────────────────────────────────────────────────────────────
+gen_uuid() {
+    if command -v uuidgen &>/dev/null; then
+        uuidgen | tr '[:upper:]' '[:lower:]'
+    elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        local h; h=$(openssl rand -hex 16)
+        printf '%s-%s-%s-%s-%s\n' \
+            "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
+    fi
+}
+
 gen_email() {
     local user; user=$(openssl rand -hex 5)
     echo "${user}@$(openssl rand -hex 4).net"
@@ -36,7 +39,7 @@ get_public_ip() {
     ip=$(curl -sf --max-time 5 https://api.ipify.org \
       || curl -sf --max-time 5 https://ifconfig.me \
       || curl -sf --max-time 5 https://icanhazip.com) || true
-    [[ -n "$ip" ]] || { echo "[-] 无法获取公网 IP" >&2; exit 1; }
+    [[ -n "$ip" ]] || { echo -e "${RED}[-] 无法获取公网 IP${PLAIN}" >&2; exit 1; }
     echo "$ip"
 }
 
@@ -66,85 +69,100 @@ cf_create_a_record() {
         -H "Content-Type: application/json" \
         -d "{\"type\":\"A\",\"name\":\"${fqdn}\",\"content\":\"${ip}\",\"ttl\":60,\"proxied\":false}")
     echo "$resp" | grep -q '"success":true' \
-        || { echo "[-] CF 建 DNS 记录失败: $resp" >&2; exit 1; }
+        || { echo -e "${RED}[-] CF 建 DNS 记录失败: $resp${PLAIN}" >&2; exit 1; }
     echo "$resp" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4
 }
 
 install_acme() {
     local email="$1"
     [[ -f ~/.acme.sh/acme.sh ]] && return
-    echo "[*] 安装 acme.sh..."
+    echo -e "${GREEN}[*] 安装 acme.sh...${PLAIN}"
     curl -sf https://get.acme.sh | sh -s "email=${email}"
     [[ -f ~/.acme.sh/acme.sh.env ]] && source ~/.acme.sh/acme.sh.env || true
 }
 
 install_binary() {
-    if command -v vless-wss-rs &>/dev/null; then
-        echo "[+] vless-wss-rs 已安装，跳过下载"; return
-    fi
-    echo "[*] 正在下载 vless-wss-rs..."
+    echo -e "${GREEN}[*] 正在下载 vless-wss-rs...${PLAIN}"
     local REPO="qaz69s/vless-wss-rs"
     local TMP; TMP=$(mktemp -d)
+    trap "rm -rf $TMP" RETURN
     if curl -sLf \
         "https://github.com/$REPO/releases/latest/download/vless-wss-rs-x86_64-unknown-linux-musl.tar.gz" \
         -o "$TMP/vless.tar.gz" 2>/dev/null; then
         tar xzf "$TMP/vless.tar.gz" -C "$TMP"
         chmod +x "$TMP/vless-wss-rs"
         mv "$TMP/vless-wss-rs" /usr/local/bin/
-        echo "[+] 已从 Release 安装"
+        echo -e "${GREEN}[+] 主程序已安装${PLAIN}"
     else
-        echo "[-] 下载 Release 失败，请检查网络。"
+        echo -e "${RED}[-] 下载 Release 失败，请检查网络。${PLAIN}"
         exit 1
     fi
-    rm -rf "$TMP"
 }
 
 # ────────────────────────────────────────────────────────────
-# 核心执行逻辑
+# 菜单功能模块
 # ────────────────────────────────────────────────────────────
-echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
-echo -e "${GREEN}  vless-wss-rs 纯静默一键安装 (Cloudflare DNS 版)${PLAIN}"
-echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
 
-EMAIL=$(gen_email)
-install_binary
+# 1. 安装模块
+function do_install() {
+    clear
+    echo -e "${CYAN}================================================================${PLAIN}"
+    echo -e "${CYAN}                开始安装 vless-wss-rs                   ${PLAIN}"
+    echo -e "${CYAN}================================================================${PLAIN}"
+    
+    if [ -f "/etc/systemd/system/vless-wss-rs.service" ]; then
+        echo -e "${YELLOW}[!] 检测到系统已安装 vless-wss-rs，继续安装将覆盖原配置。${PLAIN}"
+    fi
 
-SUB=$(openssl rand -hex 3)
-FQDN="${SUB}.${BASE_DOMAIN}"
-echo -e "[*] 随机 UUID: ${YELLOW}$UUID${PLAIN}"
-echo -e "[*] 随机子域名: ${YELLOW}$FQDN${PLAIN}"
+    read -rp "1. 请输入 Cloudflare API Token (需具备 Zone:Read + DNS:Edit): " CF_TOKEN
+    [[ -z "$CF_TOKEN" ]] && { echo -e "${RED}[-] Token 不能为空${PLAIN}"; return; }
 
-SERVER_IP=$(get_public_ip)
-echo -e "[*] 本机公网 IP: ${YELLOW}$SERVER_IP${PLAIN}"
+    read -rp "2. 请输入根域名 (例: example.com): " BASE_DOMAIN
+    [[ -z "$BASE_DOMAIN" ]] && { echo -e "${RED}[-] 域名不能为空${PLAIN}"; return; }
 
-echo "[*] 查询 Cloudflare Zone ID..."
-ZONE_ID=$(cf_zone_id "$BASE_DOMAIN" "$CF_TOKEN") || {
-    echo "[-] 未找到 ${BASE_DOMAIN} 对应的 Zone，请检查 Token 权限和域名"
-    exit 1
-}
+    read -rp "3. 请输入 UUID [留空随机生成]: " UUID
+    [[ -z "$UUID" ]] && UUID=$(gen_uuid) && echo -e "   ${YELLOW}[*] 已自动生成随机 UUID: $UUID${PLAIN}"
 
-RECORD_ID=$(cf_create_a_record "$ZONE_ID" "$FQDN" "$SERVER_IP" "$CF_TOKEN")
-echo -e "[+] DNS A 记录已创建: ${YELLOW}$FQDN → $SERVER_IP${PLAIN}"
+    read -rp "4. 请输入监听地址与端口 [默认 0.0.0.0:443]: " LISTEN
+    LISTEN=${LISTEN:-0.0.0.0:443}
+    PORT=$(echo "$LISTEN" | awk -F':' '{print $NF}')
 
-install_acme "$EMAIL"
-ACME=~/.acme.sh/acme.sh
-"$ACME" --set-default-ca --server letsencrypt 2>/dev/null || true
-echo "[*] 申请 TLS 证书（DNS-01）..."
-export CF_Token="$CF_TOKEN"
-"$ACME" --issue --dns dns_cf -d "$FQDN" --keylength ec-256 --server letsencrypt
+    echo -e "\n${GREEN}================ 开始自动化部署 ==================${PLAIN}"
 
-# 规范化证书路径
-CERT_BASE_DIR="/etc/vless-wss-rs"
-mkdir -p "$CERT_BASE_DIR"
-"$ACME" --install-cert -d "$FQDN" --ecc \
-    --fullchain-file "$CERT_BASE_DIR/cert.cer" \
-    --key-file "$CERT_BASE_DIR/private.key"
+    EMAIL=$(gen_email)
+    install_binary
 
-echo -e "[+] 证书已安装至: ${YELLOW}$CERT_BASE_DIR${PLAIN}"
+    SUB=$(openssl rand -hex 3)
+    FQDN="${SUB}.${BASE_DOMAIN}"
+    echo -e "${GREEN}[*] 随机子域名: ${YELLOW}$FQDN${PLAIN}"
 
-# 配置 Systemd 守护进程
-echo "[*] 配置 Systemd 后台服务..."
-cat > /etc/systemd/system/vless-wss-rs.service <<EOF
+    SERVER_IP=$(get_public_ip)
+    echo -e "${GREEN}[*] 本机公网 IP: ${YELLOW}$SERVER_IP${PLAIN}"
+
+    echo -e "${GREEN}[*] 查询 Cloudflare Zone ID...${PLAIN}"
+    ZONE_ID=$(cf_zone_id "$BASE_DOMAIN" "$CF_TOKEN") || {
+        echo -e "${RED}[-] 未找到 ${BASE_DOMAIN} 对应的 Zone，请检查 Token 权限和域名${PLAIN}"
+        return
+    }
+
+    RECORD_ID=$(cf_create_a_record "$ZONE_ID" "$FQDN" "$SERVER_IP" "$CF_TOKEN")
+    echo -e "${GREEN}[+] DNS A 记录已创建: ${YELLOW}$FQDN → $SERVER_IP${PLAIN}"
+
+    install_acme "$EMAIL"
+    ACME=~/.acme.sh/acme.sh
+    "$ACME" --set-default-ca --server letsencrypt 2>/dev/null || true
+    echo -e "${GREEN}[*] 申请 TLS 证书（DNS-01）...${PLAIN}"
+    export CF_Token="$CF_TOKEN"
+    "$ACME" --issue --dns dns_cf -d "$FQDN" --keylength ec-256 --server letsencrypt
+
+    CERT_BASE_DIR="/etc/vless-wss-rs"
+    mkdir -p "$CERT_BASE_DIR"
+    "$ACME" --install-cert -d "$FQDN" --ecc \
+        --fullchain-file "$CERT_BASE_DIR/cert.cer" \
+        --key-file "$CERT_BASE_DIR/private.key"
+
+    echo -e "${GREEN}[*] 配置 Systemd 后台服务...${PLAIN}"
+    cat > /etc/systemd/system/vless-wss-rs.service <<EOF
 [Unit]
 Description=vless-wss-rs Lightweight VLESS WebSocket Server
 After=network.target
@@ -161,27 +179,111 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable vless-wss-rs
-systemctl restart vless-wss-rs
+    systemctl daemon-reload
+    systemctl enable vless-wss-rs
+    systemctl restart vless-wss-rs
 
-# 生成 VLESS 导入链接并输出节点信息
-VLESS_LINK="vless://${UUID}@${FQDN}:${PORT}?encryption=none&security=tls&type=ws&sni=${FQDN}#vless-wss-rs"
+    VLESS_LINK="vless://${UUID}@${FQDN}:${PORT}?encryption=none&security=tls&type=ws&sni=${FQDN}#vless-wss-rs"
 
-echo ""
-echo -e "${GREEN}================================================================${PLAIN}"
-echo -e "${GREEN} 恭喜！vless-wss-rs 安装成功并已在后台稳定运行！${PLAIN}"
-echo -e "${GREEN}================================================================${PLAIN}"
-echo -e " 地址 (Address): ${YELLOW}${FQDN}${PLAIN}"
-echo -e " 端口 (Port)   : ${YELLOW}${PORT}${PLAIN}"
-echo -e " 用户 (UUID)   : ${YELLOW}${UUID}${PLAIN}"
-echo -e " 传输协议 (Net): ${YELLOW}ws${PLAIN}"
-echo -e " 伪装域名 (SNI): ${YELLOW}${FQDN}${PLAIN}"
-echo -e " 底层传输安全  : ${YELLOW}tls${PLAIN}"
-echo -e " 证书存放目录  : ${YELLOW}${CERT_BASE_DIR}${PLAIN}"
-echo -e "${GREEN}================================================================${PLAIN}"
-echo -e " ${YELLOW}👇 一键导入链接 (复制以下全段内容至客户端):${PLAIN}"
-echo -e "\n${VLESS_LINK}\n"
-echo -e "${GREEN}================================================================${PLAIN}"
-echo -e " 日志查看命令: journalctl -u vless-wss-rs -f"
-echo -e " 服务重启命令: systemctl restart vless-wss-rs"
+    echo -e "\n${CYAN}================================================================${PLAIN}"
+    echo -e "${GREEN} 恭喜！vless-wss-rs 安装成功并已在后台稳定运行！${PLAIN}"
+    echo -e "${CYAN}================================================================${PLAIN}"
+    echo -e " 地址 (Address): ${YELLOW}${FQDN}${PLAIN}"
+    echo -e " 端口 (Port)   : ${YELLOW}${PORT}${PLAIN}"
+    echo -e " 用户 (UUID)   : ${YELLOW}${UUID}${PLAIN}"
+    echo -e " 伪装域名 (SNI): ${YELLOW}${FQDN}${PLAIN}"
+    echo -e "${CYAN}================================================================${PLAIN}"
+    echo -e " ${YELLOW}👇 一键导入链接 (复制以下全段内容):${PLAIN}"
+    echo -e "\n${VLESS_LINK}\n"
+    echo -e "${CYAN}================================================================${PLAIN}"
+}
+
+# 2. 查看日志模块
+function do_view_logs() {
+    clear
+    if ! systemctl is-active --quiet vless-wss-rs; then
+        echo -e "${YELLOW}服务未运行或未安装，无法查看日志。${PLAIN}"
+    else
+        echo -e "${CYAN}正在显示最新的 50 条日志 (按 q 退出日志视图):${PLAIN}"
+        echo -e "----------------------------------------------------"
+        journalctl -u vless-wss-rs -n 50 --no-pager
+        echo -e "----------------------------------------------------"
+    fi
+}
+
+# 3. 重启核心模块
+function do_restart() {
+    clear
+    if [ -f "/etc/systemd/system/vless-wss-rs.service" ]; then
+        echo -e "${GREEN}[*] 正在重启 vless-wss-rs 服务...${PLAIN}"
+        systemctl restart vless-wss-rs
+        if systemctl is-active --quiet vless-wss-rs; then
+            echo -e "${GREEN}[+] 重启成功！服务正在运行。${PLAIN}"
+        else
+            echo -e "${RED}[-] 重启失败，请使用菜单中的“查看运行日志”排查报错。${PLAIN}"
+        fi
+    else
+        echo -e "${YELLOW}[!] 未检测到 vless-wss-rs 服务，请先安装。${PLAIN}"
+    fi
+}
+
+# 4. 彻底卸载模块
+function do_uninstall() {
+    clear
+    echo -e "${RED}================================================================${PLAIN}"
+    echo -e "${RED}  警告：此操作将彻底删除 vless-wss-rs 的所有文件、配置和证书。${PLAIN}"
+    echo -e "${RED}================================================================${PLAIN}"
+    read -rp "您确定要继续卸载吗？(y/n): " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        echo -e "${YELLOW}[*] 正在停止并禁用服务...${PLAIN}"
+        systemctl stop vless-wss-rs &>/dev/null || true
+        systemctl disable vless-wss-rs &>/dev/null || true
+        
+        echo -e "${YELLOW}[*] 正在删除程序文件与配置...${PLAIN}"
+        rm -f /etc/systemd/system/vless-wss-rs.service
+        rm -f /usr/local/bin/vless-wss-rs
+        rm -rf /etc/vless-wss-rs
+        systemctl daemon-reload
+        
+        echo -e "${GREEN}[+] 清理完成！vless-wss-rs 已彻底卸载。${PLAIN}"
+    else
+        echo -e "${GREEN}[*] 已取消卸载操作。${PLAIN}"
+    fi
+}
+
+# ────────────────────────────────────────────────────────────
+# 主程序入口 (无限循环菜单)
+# ────────────────────────────────────────────────────────────
+while true; do
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e "${CYAN}         vless-wss-rs 综合管理工具箱 v1.0         ${PLAIN}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    echo -e " ${GREEN}1.${PLAIN} 安装 vless-wss-rs (一键全自动部署)"
+    echo -e " ${GREEN}2.${PLAIN} 查看运行日志 (排查连接问题)"
+    echo -e " ${GREEN}3.${PLAIN} 重启核心服务"
+    echo -e " ${GREEN}4.${PLAIN} 彻底卸载程序"
+    echo -e " ${GREEN}0.${PLAIN} 退出脚本"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}"
+    
+    read -rp "请输入选项数字 [0-4]: " num
+    case "$num" in
+        1) do_install
+           ;;
+        2) do_view_logs
+           ;;
+        3) do_restart
+           ;;
+        4) do_uninstall
+           ;;
+        0) echo -e "${GREEN}[*] 感谢使用，已退出！${PLAIN}"; exit 0
+           ;;
+        *) echo -e "${RED}[-] 输入有误，请输入 0-4 之间的数字。${PLAIN}"
+           ;;
+    esac
+    
+    # 执行完任意非退出操作后，暂停一下，等待用户按回车继续
+    echo ""
+    read -rp "按下 回车键 (Enter) 返回主菜单..."
+    clear
+done
