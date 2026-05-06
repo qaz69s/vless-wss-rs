@@ -21,6 +21,10 @@ struct Args {
     #[arg(long)]
     key: PathBuf,
 
+    /// Domain name (used in VLESS URI)
+    #[arg(long)]
+    domain: String,
+
     /// Listen address
     #[arg(long, default_value = "0.0.0.0:443")]
     listen: String,
